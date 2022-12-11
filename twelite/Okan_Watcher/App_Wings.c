@@ -30,6 +30,13 @@
 #define ToCoNet_USE_MOD_NBSCAN_SLAVE // Neighbour scan slave module
 #define ToCoNet_USE_MOD_DUPCHK
 
+/****************************************************************************/
+/***        UART Definitions                                           ***/
+/****************************************************************************/
+#define UART_PORT_SLAVE E_AHI_UART_1
+#define UART_BAUD_RATE_SLAVE 19200
+
+
 // includes
 #include "ToCoNet.h"
 #include "ToCoNet_mod_prototype.h"
@@ -59,9 +66,13 @@ void vSerInitMessage();	// 起動メッセージ
 // 初期化類
 static void vInitHardware(int f_warm_start);
 static void vSerialInit(uint32, tsUartOpt *);
+static void vSerialInit2();
 static void vProcessSerialParseCmd(TWESERCMD_tsSerCmd_Context *pSerCmd, int16 u16Byte);
 
 void (* pvProcessSerialCmd)(TWESERCMD_tsSerCmd_Context*);	// 書式解釈後処理のコールバック関数
+
+static void vReceiveNwkMsg(tsRxDataApp *);
+static void vOutput_OpenClosePAL(tsRxPktInfo, uint8 *);
 
 /****************************************************************************/
 /***        Exported Variables                                            ***/
@@ -72,7 +83,10 @@ void (* pvProcessSerialCmd)(TWESERCMD_tsSerCmd_Context*);	// 書式解釈後処�
 /****************************************************************************/
 tsAppData sAppData; //!< アプリケーションデータ  @ingroup MASTER
 
+tsFILE sSerStream;
+tsFILE sSerStream2;
 PUBLIC TWE_tsFILE sSer;
+PUBLIC TWE_tsFILE sSer2;
 extern TWESTG_tsFinal sFinal;
 extern const TWEINTRCT_tsFuncs asFuncs[];
 TWEINTRCT_tsContext* sIntr;
@@ -243,14 +257,146 @@ void cbToCoNet_vMain(void) {
 	}
 }
 
+
 /** @ingroup MASTER
  * パケットの受信完了時に呼び出されるコールバック関数。\n
  * @param psRx 受信パケット
  */
 void cbToCoNet_vRxEvent(tsRxDataApp *psRx) {
-	if (psCbHandler && psCbHandler->pf_cbToCoNet_vRxEvent) {
-		(*psCbHandler->pf_cbToCoNet_vRxEvent)(psRx);
-	}
+  if (psCbHandler && psCbHandler->pf_cbToCoNet_vRxEvent) {
+    (*psCbHandler->pf_cbToCoNet_vRxEvent)(psRx);
+  }
+
+  // インタラクティブモードだったら何もしない
+  if (TWEINTRCT_bIsVerbose()) {
+    return;
+  }
+
+  // 暗号化対応時に平文パケットは受信しない
+  if (IS_APPCONF_OPT_SECURE() && !IS_APPCONF_OPT_RCV_NOSECURE()) {
+    if (!psRx->bSecurePkt) {
+      return;
+    }
+  }
+
+  // データパケット以外は無視する
+  if(psRx->u8Cmd != TOCONET_PACKET_CMD_APP_DATA){
+    return;
+  }
+
+  vReceiveNwkMsg(psRx);
+}
+
+/**
+ * 子機または中継機を経由したデータを受信する。
+ *
+ * @param pRx 受信データ構造体
+ */
+static void vReceiveNwkMsg(tsRxDataApp *pRx) {
+  tsRxPktInfo sRxPktInfo;
+
+  uint8 *p = pRx->auData;
+
+  uint8 u8b = G_OCTET();
+
+  // PALからのパケット以外は無視する
+  if (u8b & 0x80 != 1) {
+    return;
+  }
+
+  // パケット経路を判別し，想定外パケットは無視する
+  // T:端末 R:ルータ
+  u8b = u8b&0x7F;
+  if (u8b != 'T' && u8b != 'R'){
+    return;
+  }
+
+  // パケット共通データの構築
+  sRxPktInfo.u8lqi_1st = pRx->u8Lqi;
+  sRxPktInfo.u32addr_1st = pRx->u32SrcAddr;
+  sRxPktInfo.u32addr_rcvr = TOCONET_NWK_ADDR_PARENT;
+  // ルータ経由の場合は元端末の情報に書き換える
+  if (u8b == 'R') {
+    sRxPktInfo.u32addr_1st = G_BE_DWORD();
+    sRxPktInfo.u8lqi_1st = G_OCTET();
+    sRxPktInfo.u32addr_rcvr = pRx->u32SrcAddr;
+  }
+  sRxPktInfo.u8id = G_OCTET();
+  sRxPktInfo.u16fct = G_BE_WORD();
+  sRxPktInfo.u8pkt = G_OCTET();
+
+  vfPrintf(&sSerStream, "packet type %02x"LB, sRxPktInfo.u8pkt);
+
+  // 開閉センサPALのデータの出力
+  if (sRxPktInfo.u8pkt == 0x81) {
+    vOutput_OpenClosePAL(sRxPktInfo, p);
+  }
+}
+
+/**
+ * 開閉センサPALのデータからフレームを構築しUART1に出力する
+ *
+ * @param sRxPktInfo 受信パケット情報
+ * @param p 受信パケットのペイロード
+ */
+static void vOutput_OpenClosePAL(tsRxPktInfo sRxPktInfo, uint8 *p) {
+  uint8 outbuf[32]; // 出力バッファ
+  uint8* q = outbuf;
+
+  // 送信元アドレス
+  S_BE_DWORD(sRxPktInfo.u32addr_1st);
+  vfPrintf(&sSerStream, "src address %04X"LB, sRxPktInfo.u32addr_1st);
+
+  uint8 u8Length = G_OCTET();
+
+  // 電源電圧
+  _C{
+    G_OCTET(); // sensor type
+    G_OCTET(); // sensor type (extension)
+    uint8 u8Pwr = G_OCTET();
+    uint16 u16ADC = DECODE_VOLT(u8Pwr);
+    S_BE_WORD(u16ADC);
+
+    vfPrintf(&sSerStream, "power voltage %d"LB, u16ADC);
+  }
+
+  // ADC1
+  _C{
+    G_OCTET(); // sensor type
+    G_OCTET(); // sensor type (extension)
+    uint16 u16ADC = 0;
+    u16ADC = G_BE_WORD();
+
+    vfPrintf(&sSerStream, "ADC1 voltage %d"LB, u16ADC);
+  }
+
+  // 磁石
+  _C{
+    G_OCTET(); // sensor type
+    G_OCTET(); // sensor type (extension)
+    uint8 u8Status = G_OCTET();
+    uint8 isPeriodic = (u8Status >> 4) > 0;
+    u8Status &= 0x0F;
+    S_OCTET(u8Status);
+    S_OCTET(isPeriodic);
+
+    vfPrintf(&sSerStream, "hellic status %d (periodic: %d)"LB, u8Status, isPeriodic);
+  }
+
+  uint16 bufLen = q - outbuf;
+  uint16 i;
+  // UART0にデバッグ出力
+  for (i = 0; i<bufLen; i++) {
+    vfPrintf(&sSerStream, "%02X ", outbuf[i]);
+  }
+  vfPrintf(&sSerStream, LB);
+
+  // STX,ETXを前後につけてUART1に出力
+  vPutChar(&sSerStream2, 0x02);
+  for (i = 0; i<bufLen; i++) {
+    vfPrintf(&sSerStream2, "%02X", outbuf[i]);
+  }
+  vPutChar(&sSerStream2, 0x03);
 }
 
 /** @ingroup MASTER
@@ -431,6 +577,7 @@ static void vInitHardware(int f_warm_start) {
 		}else{
 			vSerialInit(UART_BAUD, NULL);
 		}
+    vSerialInit2();
 	}
 
 	// タイマの未使用ポートの解放（汎用ＩＯとして使用するため）
@@ -472,6 +619,7 @@ static void vInitHardware(int f_warm_start) {
 
 	vTimerConfig(&sTimerPWM);
 	vTimerStart(&sTimerPWM);
+
 }
 
 /** @ingroup MASTER
@@ -494,12 +642,33 @@ void vSerialInit(uint32 u32Baud, tsUartOpt *pUartOpt) {
 
 	TWETERM_vInitJen(&sSer, UART_PORT_MASTER, &sDef);
 
-	static tsFILE sSerStream;
 	sSerStream.u8Device = UART_PORT_MASTER;
 	sSerStream.bPutChar = SERIAL_bTxChar;
 	ToCoNet_vDebugInit(&sSerStream);
 	ToCoNet_vDebugLevel(0);
 
+}
+
+void vSerialInit2() {
+	/* Create the debug port transmit and receive queues */
+	static uint8 au8Serial2TxBuffer[256];
+	static uint8 au8Serial2RxBuffer[256];
+
+	TWETERM_tsSerDefs sDef;
+
+	sDef.au8RxBuf = au8Serial2RxBuffer;
+	sDef.au8TxBuf = au8Serial2TxBuffer;
+
+	sDef.u16RxBufLen = sizeof(au8Serial2RxBuffer);
+	sDef.u16TxBufLen = sizeof(au8Serial2TxBuffer);
+	sDef.u32Baud = UART_BAUD_RATE_SLAVE;
+
+	TWETERM_vInitJen(&sSer2, UART_PORT_SLAVE, &sDef);
+
+	/* static tsFILE sSerStream; */
+	sSerStream2.u8Device = UART_PORT_SLAVE;
+	sSerStream2.bPutChar = SERIAL_bTxChar;
+	ToCoNet_vDebugInit(&sSerStream2);
 }
 
 /** @ingroup MASTER
