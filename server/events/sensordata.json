@@ -1,0 +1,9 @@
+{
+  "body": "{\"type\": \"magnet\", \"src_address\": \"00112233\", \"battery\": 2075, \"pole\": 1, \"changed\": 1}",
+  "resource": "/{proxy+}",
+  "path": "/sensordata",
+  "httpMethod": "POST",
+  "headers": {
+    "Authorization": "Bearer hoge"
+  }
+}

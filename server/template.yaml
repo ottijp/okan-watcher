@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  okan watcher
+
+Globals:
+  Function:
+    Timeout: 3
+
+Resources:
+  OkanWatcherApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Auth:
+        ApiKeyRequired: true
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          UsagePlanName: GatewayAuthorization
+  OkanWatcherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: okan-watcher/
+      Handler: app.lambdaHandler
+      Runtime: nodejs16.x
+      Architectures:
+        - x86_64
+      Events:
+        SensorData:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OkanWatcherApi
+            Path: /sensordata
+            Method: post
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        # Sourcemap: true # Enabling source maps will create the required NODE_OPTIONS environment variables on your lambda function during sam build
+        EntryPoints:
+        - app.ts
+
+Outputs:
+  OkanWatcherApi:
+    Description: "API Gateway endpoint URL for Prod stage for uploading sensor data"
+    Value: !Sub "https://${OkanWatcherApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/sensordata/"
+  OkanWatcherFunction:
+    Description: "Lambda Function ARN"
+    Value: !GetAtt OkanWatcherFunction.Arn
+  OkanWatcherFunctionIamRole:
+    Description: "Implicit IAM Role created for function"
+    Value: !GetAtt OkanWatcherFunction.Arn
+  ApiKey:
+    Description: "You can find your API Key in the AWS console: (Put in the request HEADER as 'x-api-key')"
+    Value: !Sub "https://console.aws.amazon.com/apigateway/home?region=${AWS::Region}#/api-keys/${OkanWatcherApiApiKey}"
