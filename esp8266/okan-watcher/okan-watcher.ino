@@ -10,6 +10,8 @@
 #define ETX 0x03
 #define UART_BAUD_RATE 19200
 
+#define WIFI_LED 4
+
 #define API_URL "your-api-url"
 #define API_KEY "your-api-key"
 
@@ -17,6 +19,9 @@
 String tweliteMessage = "";
 
 void setup() {
+  pinMode(WIFI_LED, OUTPUT);
+  digitalWrite(WIFI_LED, LOW);
+  
   Serial.begin(UART_BAUD_RATE);
   Serial.println();
 
@@ -30,6 +35,7 @@ void setup() {
   Serial.println();
   Serial.println("WiFi connected");
   Serial.printf("IP address: %s\n", WiFi.localIP());
+  digitalWrite(WIFI_LED, HIGH);
 }
 
 void loop() {
