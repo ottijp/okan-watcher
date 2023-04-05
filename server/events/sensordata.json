@@ -1,5 +1,5 @@
 {
-  "body": "{\"type\": \"magnet\", \"src_address\": \"00112233\", \"battery\": 2075, \"pole\": 1, \"changed\": 1}",
+  "body": "{\"type\": \"magnet\", \"src_address\": \"00112233\", \"battery\": 2075, \"pole\": 1, \"changed\": true}",
   "resource": "/{proxy+}",
   "path": "/sensordata",
   "httpMethod": "POST",
