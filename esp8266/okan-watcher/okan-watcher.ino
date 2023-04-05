@@ -88,7 +88,7 @@ String buildJson(String tweMessage) {
   doc["src_address"] = tweMessage.substring(0,8);
   doc["battery"] = battery;
   doc["pole"] = pole;
-  doc["changed"] = isPeriodic == 1 ? true : false;
+  doc["changed"] = isPeriodic == 1 ? false : true;
   serializeJson(doc, json, sizeof(json));
 
   return String(json);
