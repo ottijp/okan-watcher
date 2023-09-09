@@ -1,4 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda'
+import { decode } from './decoder'
 
 /**
  *
@@ -6,24 +7,18 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda'
  * @returns {Object} object - API Gateway Lambda Proxy Output Format
  */
 export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  let response: APIGatewayProxyResult
-  try {
-    console.log(JSON.stringify(event))
-    response = {
-      statusCode: 200,
-      body: JSON.stringify({
-        message: 'hello world',
-      }),
-    }
-  } catch (err: unknown) {
-    console.error(err)
-    response = {
-      statusCode: 500,
-      body: JSON.stringify({
-        message: err instanceof Error ? err.message : 'some error happened',
-      }),
-    }
-  }
+  return await new App().run(event.body || '')
+}
 
-  return response
+export class App {
+  async run(rawMessage: string): Promise<APIGatewayProxyResult> {
+    // decode request message
+    const message = decode(rawMessage)
+    if (message === null) {
+      return { statusCode: 400, body: '' }
+    }
+
+    console.log(`data recieved: ${JSON.stringify(message)}`)
+    return { statusCode: 200, body: '' }
+  }
 }
