@@ -1,38 +1,36 @@
 import { isRight } from 'fp-ts/lib/Either'
+import MagnetSensorData from './measured-data'
 import * as t from 'io-ts'
 
-const Message = t.type({
-  type: t.string,
+const RawMessage = t.type({
+  type: t.literal('magnet'),
   src_address: t.string,
   battery: t.number,
   pole: t.number,
   changed: t.boolean,
 })
 
-export const decode = (rawMessage: string): Message | null => {
+export const decode = (rawMessage: string): MagnetSensorData | null => {
   let jsonMessage
 
   try {
     jsonMessage = JSON.parse(rawMessage)
   }
   catch {
-    console.error('not JSON string:', rawMessage)
     return null
   }
 
-  const response = Message.decode(jsonMessage)
+  const response = RawMessage.decode(jsonMessage)
   if (!isRight(response)) {
-    console.error('invalid format:', jsonMessage)
     return null
   }
+
+  const status = response.right.pole == 0 ? 'open' : 'closed'
 
   return {
-    type: response.right.type,
-    src_address: response.right.src_address,
+    deviceAddress: response.right.src_address,
     battery: response.right.battery,
-    pole: response.right.pole,
+    status,
     changed: response.right.changed,
   }
 }
-
-export type Message = t.TypeOf<typeof Message>

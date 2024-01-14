@@ -1,5 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda'
 import { decode } from './decoder'
+import { RepositoryInterface, Repository } from './repository'
 
 /**
  *
@@ -11,14 +12,31 @@ export const lambdaHandler = async (event: APIGatewayProxyEvent): Promise<APIGat
 }
 
 export class App {
+  repository: RepositoryInterface
+
+  constructor(
+    repository = new Repository(),
+  ) {
+    this.repository = repository
+  }
+
   async run(rawMessage: string): Promise<APIGatewayProxyResult> {
     // decode request message
-    const message = decode(rawMessage)
-    if (message === null) {
+    const sensorData = decode(rawMessage)
+    if (sensorData === null) {
+      console.error('invalid message:', rawMessage)
       return { statusCode: 400, body: '' }
     }
 
-    console.log(`data recieved: ${JSON.stringify(message)}`)
-    return { statusCode: 200, body: '' }
+    // store sensing data to storage
+    try {
+      await this.repository.save(sensorData)
+      return { statusCode: 200, body: '' }
+    }
+    catch (e) {
+      console.error('保存に失敗')
+      console.error(e)
+      return { statusCode: 500, body: '' }
+    }
   }
 }
