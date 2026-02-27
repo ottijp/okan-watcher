@@ -2,6 +2,10 @@ import { TimestreamWriteClient, WriteRecordsCommand, WriteRecordsRequest, _Recor
 import MagnetSensorData from './measured-data'
 
 export interface RepositoryInterface {
+  /**
+   * @param data ストレージに保存する計測データ
+   * @throws ストレージへの保存に失敗した場合
+   */
   save(data: MagnetSensorData): Promise<void>
 }
 
