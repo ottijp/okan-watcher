@@ -6,7 +6,8 @@
   "author": "Satoshi SAKAO",
   "license": "MIT",
   "dependencies": {
-    "@aws-sdk/client-timestream-write": "^3.485.0",
+    "@aws-sdk/client-dynamodb": "^3.485.0",
+    "@aws-sdk/lib-dynamodb": "^3.485.0",
     "esbuild": "^0.14.14",
     "fp-ts": "^2.16.1",
     "io-ts": "^2.2.20"
