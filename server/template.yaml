@@ -17,6 +17,15 @@ Resources:
         UsagePlan:
           CreateUsagePlan: PER_API
           UsagePlanName: GatewayAuthorization
+        Authorizers:
+          WebUiOriginAuthorizer:
+            FunctionPayloadType: REQUEST
+            FunctionArn: !GetAtt WebUiOriginAuthorizerFunction.Arn
+            Identity:
+              Headers:
+                - x-origin-verify
+              ReauthorizeEvery: 300
+
   OkanWatcherFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -48,16 +57,75 @@ Resources:
           BATTERY_DAILY_TABLE_NAME: !Ref SensorBatteryDailyTable
           OPEN_CLOSE_EVENTS_TABLE_NAME: !Ref SensorOpenCloseEventsTable
           DEVICE_STATE_TABLE_NAME: !Ref SensorDeviceStateTable
-          BATTERY_TTL_DAYS: "3650"
-          EVENT_TTL_DAYS: "1825"
+          BATTERY_TTL_DAYS: '3650'
+          EVENT_TTL_DAYS: '1825'
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
         Minify: true
-        Target: "es2020"
-        # Sourcemap: true # Enabling source maps will create the required NODE_OPTIONS environment variables on your lambda function during sam build
+        Target: 'es2020'
         EntryPoints:
-        - app.ts
+          - app.ts
+
+  DeviceStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: okan-watcher/
+      Handler: device-status-handler.lambdaHandler
+      Runtime: nodejs24.x
+      Architectures:
+        - x86_64
+      Events:
+        DeviceStatus:
+          Type: Api
+          Properties:
+            RestApiId: !Ref OkanWatcherApi
+            Path: /api/devices/status
+            Method: get
+            Auth:
+              ApiKeyRequired: false
+              Authorizer: WebUiOriginAuthorizer
+      Policies:
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:Scan
+              - dynamodb:GetItem
+              - dynamodb:BatchGetItem
+            Resource:
+              - !GetAtt SensorDeviceStateTable.Arn
+              - !GetAtt SensorDeviceAliasTable.Arn
+      Environment:
+        Variables:
+          DEVICE_STATE_TABLE_NAME: !Ref SensorDeviceStateTable
+          DEVICE_ALIAS_TABLE_NAME: !Ref SensorDeviceAliasTable
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        EntryPoints:
+          - device-status-handler.ts
+
+  WebUiOriginAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: okan-watcher/
+      Handler: webui-origin-authorizer.lambdaHandler
+      Runtime: nodejs24.x
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          EXPECTED_ORIGIN_VERIFY_HEADER: !Sub '{{resolve:secretsmanager:${WebUiOriginVerifySecret}:SecretString:originVerifyHeader}}'
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: 'es2020'
+        EntryPoints:
+          - webui-origin-authorizer.ts
+
   SensorBatteryDailyTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -75,6 +143,7 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttlEpochSec
         Enabled: true
+
   SensorOpenCloseEventsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -92,6 +161,7 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttlEpochSec
         Enabled: true
+
   SensorDeviceStateTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -107,16 +177,209 @@ Resources:
         - AttributeName: stateKey
           AttributeType: S
 
+  SensorDeviceAliasTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: deviceAddress
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: deviceAddress
+          AttributeType: S
+
+  WebUiBasicAuthSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}/webui/basic-auth'
+      Description: Basic auth credentials for Web UI
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"user"}'
+        GenerateStringKey: password
+        PasswordLength: 12
+        ExcludePunctuation: true
+
+  WebUiOriginVerifySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AWS::StackName}/webui/origin-verify'
+      Description: Origin verification header for CloudFront to API Gateway requests
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: originVerifyHeader
+        PasswordLength: 48
+        ExcludePunctuation: true
+
+  WebUiBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  WebUiApiOriginRequestPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub '${AWS::StackName}-webui-api-origin-policy'
+        CookiesConfig:
+          CookieBehavior: none
+        HeadersConfig:
+          HeaderBehavior: none
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  WebUiBasicAuthFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub '${AWS::StackName}-webui-basic-auth'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Basic authentication for web UI
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub |
+        function handler(event) {
+          var request = event.request;
+          var authorization = request.headers.authorization;
+          var expectedUsername = '{{resolve:secretsmanager:${WebUiBasicAuthSecret}:SecretString:username}}';
+          var expectedPassword = '{{resolve:secretsmanager:${WebUiBasicAuthSecret}:SecretString:password}}';
+          var unauthorizedResponse = {
+            statusCode: 401,
+            statusDescription: 'Unauthorized',
+            headers: {
+              'www-authenticate': { value: 'Basic realm="okan-watcher"' }
+            }
+          };
+
+          if (!authorization || !authorization.value || authorization.value.indexOf('Basic ') !== 0) {
+            return unauthorizedResponse;
+          }
+
+          var decoded = '';
+          try {
+            decoded = atob(authorization.value.slice(6));
+          }
+          catch (e) {
+            return unauthorizedResponse;
+          }
+
+          var separatorIndex = decoded.indexOf(':');
+          if (separatorIndex < 0) {
+            return unauthorizedResponse;
+          }
+
+          var username = decoded.slice(0, separatorIndex);
+          var password = decoded.slice(separatorIndex + 1);
+          if (username !== expectedUsername || password !== expectedPassword) {
+            return unauthorizedResponse;
+          }
+
+          return request;
+        }
+
+  WebUiDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: WebUiS3Origin
+            DomainName: !GetAtt WebUiBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+            OriginAccessControlId: !GetAtt WebUiOriginAccessControl.Id
+          - Id: OkanWatcherApiOrigin
+            DomainName: !Sub '${OkanWatcherApi}.execute-api.${AWS::Region}.amazonaws.com'
+            OriginPath: /Prod
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+            OriginCustomHeaders:
+              - HeaderName: x-origin-verify
+                HeaderValue: !Sub '{{resolve:secretsmanager:${WebUiOriginVerifySecret}:SecretString:originVerifyHeader}}'
+        DefaultCacheBehavior:
+          TargetOriginId: WebUiS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt WebUiBasicAuthFunction.FunctionMetadata.FunctionARN
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: OkanWatcherApiOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            # CachingDisabled managed policy
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: !Ref WebUiApiOriginRequestPolicy
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt WebUiBasicAuthFunction.FunctionMetadata.FunctionARN
+
+  WebUiOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-webui-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  WebUiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebUiBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${WebUiBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${WebUiDistribution}'
+
 Outputs:
   OkanWatcherApi:
-    Description: "API Gateway endpoint URL for Prod stage for uploading sensor data"
-    Value: !Sub "https://${OkanWatcherApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/sensordata/"
+    Description: API Gateway endpoint URL for Prod stage for uploading sensor data
+    Value: !Sub 'https://${OkanWatcherApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/sensordata/'
   OkanWatcherFunction:
-    Description: "Lambda Function ARN"
+    Description: Lambda Function ARN
     Value: !GetAtt OkanWatcherFunction.Arn
+  DeviceStatusFunction:
+    Description: Device status read Lambda Function ARN
+    Value: !GetAtt DeviceStatusFunction.Arn
   ApiKey:
-    Description: "You can find your API Key in the AWS console: (Put in the request HEADER as 'x-api-key')"
-    Value: !Sub "https://console.aws.amazon.com/apigateway/home?region=${AWS::Region}#/api-keys/${OkanWatcherApiApiKey}"
+    Description: You can find your API Key in the AWS console (Put in the request header as x-api-key)
+    Value: !Sub 'https://console.aws.amazon.com/apigateway/home?region=${AWS::Region}#/api-keys/${OkanWatcherApiApiKey}'
   BatteryDailyTableName:
     Description: DynamoDB battery daily table name
     Value: !Ref SensorBatteryDailyTable
@@ -126,3 +389,21 @@ Outputs:
   DeviceStateTableName:
     Description: DynamoDB device state table name
     Value: !Ref SensorDeviceStateTable
+  DeviceAliasTableName:
+    Description: DynamoDB device alias table name
+    Value: !Ref SensorDeviceAliasTable
+  WebUiBucketName:
+    Description: S3 bucket for static web UI files
+    Value: !Ref WebUiBucket
+  WebUiCloudFrontDomainName:
+    Description: CloudFront domain for web UI access
+    Value: !GetAtt WebUiDistribution.DomainName
+  WebUiBasicAuthSecretArn:
+    Description: Auto-generated secret ARN for basic auth credentials
+    Value: !Ref WebUiBasicAuthSecret
+  WebUiOriginVerifySecretArn:
+    Description: Auto-generated secret ARN for x-origin-verify header
+    Value: !Ref WebUiOriginVerifySecret
+  WebUiUrl:
+    Description: Web UI URL
+    Value: !Sub 'https://${WebUiDistribution.DomainName}'
